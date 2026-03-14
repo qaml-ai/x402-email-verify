@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cdpPaymentMiddleware } from "x402-cdp";
-import { describeRoute, openAPIRouteHandler } from "hono-openapi";
+import { extractParams } from "x402-ai";
+import { openapiFromMiddleware } from "x402-openapi";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -160,65 +161,62 @@ function determineVerdict(
   return "deliverable";
 }
 
-// OpenAPI spec — must be before paymentMiddleware
-app.get("/.well-known/openapi.json", openAPIRouteHandler(app, {
-  documentation: {
-    info: {
-      title: "x402 Email Verification Service",
-      description: "Verify if an email address is valid and likely deliverable. Checks format, DNS, MX records, disposable domains. Pay-per-use via x402 protocol on Base mainnet.",
-      version: "1.0.0",
-    },
-    servers: [{ url: "https://verify.camelai.io" }],
-  },
-}));
+const SYSTEM_PROMPT = `You are a parameter extractor for an email verification service.
+Extract the following from the user's message and return JSON:
+- "email": the email address to verify (required)
 
-// --- x402 payment gate ---
-app.use(
-  cdpPaymentMiddleware(
-    (env) => ({
-      "GET /verify": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: "$0.005",
-            network: "eip155:8453",
-            payTo: env.SERVER_ADDRESS as `0x${string}`,
+Return ONLY valid JSON, no explanation.
+Examples:
+- {"email": "user@example.com"}
+- {"email": "test@gmail.com"}`;
+
+const ROUTES = {
+  "POST /": {
+    accepts: [{ scheme: "exact", price: "$0.005", network: "eip155:8453", payTo: "0x0" as `0x${string}` }],
+    description: "Verify if an email address is valid and likely deliverable. Send {\"input\": \"your request\"}",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          input: {
+            type: "http",
+            method: "POST",
+            bodyType: "json",
+            body: {
+              input: { type: "string", description: "Provide the email address to verify", required: true },
+            },
           },
-        ],
-        description: "Verify if an email address is valid and likely deliverable",
-        mimeType: "application/json",
-        extensions: {
-          bazaar: {
-            discoverable: true,
-            inputSchema: {
-              queryFields: {
-                email: {
-                  type: "string",
-                  description: "Email address to verify",
-                  required: true,
-                },
-              },
+          output: { type: "json" },
+        },
+        schema: {
+          properties: {
+            input: {
+              properties: { method: { type: "string", enum: ["POST"] } },
+              required: ["method"],
             },
           },
         },
       },
-    })
-  )
+    },
+  },
+};
+
+app.use(
+  cdpPaymentMiddleware((env) => ({
+    "POST /": { ...ROUTES["POST /"], accepts: [{ ...ROUTES["POST /"].accepts[0], payTo: env.SERVER_ADDRESS as `0x${string}` }] },
+  }))
 );
 
-// --- Verification endpoint ---
-app.get("/verify", describeRoute({
-  description: "Verify if an email address is valid and likely deliverable. Requires x402 payment ($0.005).",
-  responses: {
-    200: { description: "Email verification result", content: { "application/json": { schema: { type: "object" } } } },
-    400: { description: "Missing email parameter" },
-    402: { description: "Payment required" },
-  },
-}), async (c) => {
-  const email = c.req.query("email");
+app.post("/", async (c) => {
+  const body = await c.req.json<{ input?: string }>();
+  if (!body?.input) {
+    return c.json({ error: "Missing 'input' field" }, 400);
+  }
 
+  const params = await extractParams(c.env.CF_GATEWAY_TOKEN, SYSTEM_PROMPT, body.input);
+  const email = params.email as string;
   if (!email) {
-    return c.json({ error: "Missing 'email' query parameter" }, 400);
+    return c.json({ error: "Could not determine email address to verify" }, 400);
   }
 
   const validFormat = EMAIL_REGEX.test(email);
@@ -257,6 +255,16 @@ app.get("/verify", describeRoute({
     is_disposable: isDisposable,
     is_free_provider: isFreeProvider,
     verdict,
+  });
+});
+
+app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 Email Verify", "verify.camelai.io", ROUTES));
+
+app.get("/", (c) => {
+  return c.json({
+    service: "x402-email-verify",
+    description: "Verify if an email address is valid and likely deliverable. Send POST / with {\"input\": \"verify user@example.com\"}",
+    price: "$0.005 per request (Base mainnet)",
   });
 });
 
