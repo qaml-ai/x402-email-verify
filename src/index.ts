@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { cdpPaymentMiddleware } from "x402-cdp";
 import { stripeApiKeyMiddleware } from "x402-stripe";
-import { extractParams } from "x402-ai";
 import { openapiFromMiddleware } from "x402-openapi";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -162,19 +161,14 @@ function determineVerdict(
   return "deliverable";
 }
 
-const SYSTEM_PROMPT = `You are a parameter extractor for an email verification service.
-Extract the following from the user's message and return JSON:
-- "email": the email address to verify (required)
-
-Return ONLY valid JSON, no explanation.
-Examples:
-- {"email": "user@example.com"}
-- {"email": "test@gmail.com"}`;
-
 const ROUTES = {
   "POST /": {
-    accepts: [{ scheme: "exact", price: "$0.005", network: "eip155:8453", payTo: "0x0" as `0x${string}` }],
-    description: "Verify if an email address is valid and likely deliverable. Send {\"input\": \"your request\"}",
+    accepts: [
+      { scheme: "exact", price: "$0.005", network: "eip155:8453", payTo: "0x0" as `0x${string}` },
+      { scheme: "exact", price: "$0.005", network: "eip155:137", payTo: "0x0" as `0x${string}` },
+      { scheme: "exact", price: "$0.005", network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", payTo: "CvraJ4avKPpJNLvMhMH5ip2ihdt85PXvDwfzXdziUxRq" },
+    ],
+    description: "Verify if an email address is valid and likely deliverable. Send {\"email\": \"user@example.com\"}",
     mimeType: "application/json",
     extensions: {
       bazaar: {
@@ -184,7 +178,7 @@ const ROUTES = {
             method: "POST",
             bodyType: "json",
             body: {
-              input: { type: "string", description: "Provide the email address to verify", required: true },
+              email: { type: "string", description: "The email address to verify", required: true },
             },
           },
           output: { type: "json" },
@@ -207,21 +201,16 @@ app.use(stripeApiKeyMiddleware({ serviceName: "email-verify" }));
 app.use(async (c, next) => {
   if (c.get("skipX402")) return next();
   return cdpPaymentMiddleware((env) => ({
-    "POST /": { ...ROUTES["POST /"], accepts: [{ ...ROUTES["POST /"].accepts[0], payTo: env.SERVER_ADDRESS as `0x${string}` }] },
+    "POST /": { ...ROUTES["POST /"], accepts: ROUTES["POST /"].accepts.map((a: any) => ({ ...a, payTo: a.network.startsWith("solana") ? a.payTo : env.SERVER_ADDRESS as `0x${string}` })) },
   }))(c, next);
 });
 
 app.post("/", async (c) => {
-  const body = await c.req.json<{ input?: string }>();
-  if (!body?.input) {
-    return c.json({ error: "Missing 'input' field" }, 400);
+  const body = await c.req.json<{ email?: string }>();
+  if (!body?.email) {
+    return c.json({ error: "Missing 'email' field" }, 400);
   }
-
-  const params = await extractParams(c.env.CF_GATEWAY_TOKEN, SYSTEM_PROMPT, body.input);
-  const email = params.email as string;
-  if (!email) {
-    return c.json({ error: "Could not determine email address to verify" }, 400);
-  }
+  const email = body.email.trim();
 
   const validFormat = EMAIL_REGEX.test(email);
   const domain = email.split("@")[1]?.toLowerCase() || "";
@@ -267,7 +256,7 @@ app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 Email Verify", 
 app.get("/", (c) => {
   return c.json({
     service: "x402-email-verify",
-    description: "Verify if an email address is valid and likely deliverable. Send POST / with {\"input\": \"verify user@example.com\"}",
+    description: "Verify if an email address is valid and likely deliverable. Send POST / with {\"email\": \"user@example.com\"}",
     price: "$0.005 per request (Base mainnet)",
   });
 });
