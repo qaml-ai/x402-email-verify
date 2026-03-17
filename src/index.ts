@@ -254,10 +254,8 @@ app.post("/", async (c) => {
 app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 Email Verify", "verify.camelai.io", ROUTES));
 
 app.get("/", (c) => {
-  return c.json({
-    service: "x402-email-verify",
-    description: "Verify if an email address is valid and likely deliverable. Send POST / with {\"email\": \"user@example.com\"}",
-    price: "$0.005 per request (Base mainnet)",
+  return new Response('# verify.camelai.io \\u2014 Email Verify\n\nValidate email addresses.\n\nPart of [camelai.io](https://camelai.io).\n\n## API\n\n\\`POST /\\` \\u2014 $0.005 per request\n\n**Body:** `{"email": "user@example.com"}`\n\n**Response:** JSON with verdict, MX records, disposable check\n\n## Payment\n\nAccepts USDC on Base, Polygon, or Solana via x402. Or use a Stripe API key (\\`Authorization: Bearer sk_camel_...\\`).\n\nSee [camelai.io](https://camelai.io) for payment setup and full service list.', {
+    headers: { "Content-Type": "text/markdown; charset=utf-8" },
   });
 });
 
